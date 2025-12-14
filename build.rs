@@ -1,4 +1,8 @@
-use std::{env, path::{Path, PathBuf}, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn ensure_submodule(path: &Path) {
     // Heuristic: if the directory exists and contains vkFFT.h, assume initialized.
