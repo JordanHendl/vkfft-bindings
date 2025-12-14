@@ -8,6 +8,27 @@ fn vkfft_ok(r: ffi::VkFFTResult) -> bool {
     r == ffi::VkFFTResult::VKFFT_SUCCESS
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum VkfftError {
+    Vkfft(ffi::VkFFTResult),
+}
+
+impl core::fmt::Display for VkfftError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Vkfft(res) => write!(f, "VkFFT error: {:?}", res),
+        }
+    }
+}
+
+impl std::error::Error for VkfftError {}
+
+impl From<ffi::VkFFTResult> for VkfftError {
+    fn from(value: ffi::VkFFTResult) -> Self {
+        Self::Vkfft(value)
+    }
+}
+
 /// Thin wrapper around VkFFTApplication lifetime.
 ///
 /// VkFFT is C-style; most functions return an error code.
@@ -117,12 +138,14 @@ impl VkFft {
     }
 
     /// Finalize and create the VkFFT application.
-    pub fn initialize(&mut self) -> Result<(), ffi::VkFFTResult> {
+    pub fn initialize(&mut self) -> Result<(), VkfftError> {
         let res = unsafe { ffi::vkfft_initialize(&mut self.app as *mut _, self.config) };
         if vkfft_ok(res) {
+            self.initialized = true;
             Ok(())
         } else {
-            Err(res)
+            self.initialized = false;
+            Err(res.into())
         }
     }
 
