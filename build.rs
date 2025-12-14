@@ -1,4 +1,28 @@
-use std::{env, path::PathBuf};
+use std::{env, path::{Path, PathBuf}, process::Command};
+
+fn ensure_submodule(path: &Path) {
+    // Heuristic: if the directory exists and contains vkFFT.h, assume initialized.
+    if path.join("vkFFT").join("vkFFT.h").is_file() {
+        return;
+    }
+
+    // Run: git submodule update --init --recursive vendor/VkFFT
+    let status = Command::new("git")
+        .args([
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+            "vendor/VkFFT",
+        ])
+        .current_dir(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .status()
+        .expect("failed to execute git to init/update submodule");
+
+    if !status.success() {
+        panic!("git submodule update --init --recursive vendor/VkFFT failed");
+    }
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=src/shim.cpp");
@@ -6,6 +30,8 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let vkfft_dir = manifest_dir.join("vendor").join("VkFFT");
     let vkfft_include = vkfft_dir.join("vkFFT"); // contains vkFFT.h
+
+    ensure_submodule(&vkfft_dir);
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!(

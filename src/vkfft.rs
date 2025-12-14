@@ -1,7 +1,6 @@
 use ash::vk;
 
 use crate::ffi;
-use ash::vk::Handle;
 
 fn vkfft_ok(r: ffi::VkFFTResult) -> bool {
     // Common bindgen output: a constant VKFFT_SUCCESS: u32
