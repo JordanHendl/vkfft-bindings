@@ -281,6 +281,7 @@ pub struct VkFft {
     app: ffi::VkFFTApplication,
     config: ffi::VkFFTConfiguration,
     initialized: bool,
+    buffer_sizes: [u64; 1],
 
     // Keep Vulkan handles alive because VkFFTConfiguration stores pointers to them.
     phys: vk::PhysicalDevice,
@@ -307,6 +308,7 @@ impl VkFft {
             app,
             config,
             initialized: false,
+            buffer_sizes: [0],
 
             phys: vk::PhysicalDevice::null(),
             dev: vk::Device::null(),
@@ -362,14 +364,15 @@ impl VkFft {
         // Adjust names if your VkFFT differs.
         self.config.FFTdim = sizes.len() as u64;
 
-        // VkFFT size is usually 3-wide; pad with 1s.
-        let mut tmp = [1u64; 3];
-        for (i, v) in sizes.iter().take(3).enumerate() {
+        // VkFFT size is usually 3- or 4-wide depending on version; pad with 1s.
+        let mut tmp = [1u64; 4];
+        for (i, v) in sizes.iter().take(4).enumerate() {
             tmp[i] = *v;
         }
         self.config.size[0] = tmp[0];
         self.config.size[1] = tmp[1];
         self.config.size[2] = tmp[2];
+        self.config.size[3] = tmp[3];
     }
 
     /// Configure input (and optional output) device buffers.
@@ -577,6 +580,13 @@ impl VkFft {
         };
     }
 
+    /// Set the size of the buffer in bytes.
+    pub fn configure_buffer_size(&mut self, buffer_size: vk::DeviceSize) {
+        self.buffer_sizes[0] = buffer_size;
+        self.config.bufferSize = self.buffer_sizes.as_mut_ptr();
+        self.config.bufferNum = 1;
+    }
+
     /// Finalize and create the VkFFT application.
     pub fn initialize(&mut self) -> Result<(), VkfftError> {
         let res = unsafe { ffi::vkfft_initialize(&mut self.app as *mut _, self.config) };
@@ -624,5 +634,51 @@ impl Drop for VkFft {
                 let _ = ffi::vkfft_delete(&mut self.app as *mut _);
             }
         }
+    }
+}
+
+#[cfg(all(feature = "wrapper", test))]
+mod tests {
+    use ash::vk::Handle;
+
+    use super::*;
+
+    #[test]
+    fn configures_dimensions_and_buffers() {
+        let mut fft = VkFft::new();
+        assert!(!fft.initialized);
+
+        fft.configure_dimensions(&[16, 8]);
+        assert_eq!(fft.config.FFTdim, 2);
+        assert_eq!(fft.config.size[0], 16);
+        assert_eq!(fft.config.size[1], 8);
+        assert_eq!(fft.config.size[2], 1);
+        assert_eq!(fft.config.size[3], 1);
+
+        let dummy_buffer = vk::Buffer::from_raw(0xDEADBEEF_u64);
+        fft.configure_buffers(dummy_buffer);
+
+        let stored_ptr = fft.config.buffer as *mut vk::Buffer;
+        assert_eq!(unsafe { *stored_ptr }, dummy_buffer);
+    }
+
+    #[test]
+    fn configures_buffer_size() {
+        let mut fft = VkFft::new();
+
+        fft.configure_buffer_size(1024);
+        assert_eq!(unsafe { *fft.config.bufferSize }, 1024);
+        assert_eq!(fft.config.bufferNum, 1);
+    }
+
+    #[test]
+    fn append_rejects_when_not_initialized() {
+        let mut fft = VkFft::new();
+        assert_eq!(fft.initialized, false);
+
+        let err = fft
+            .append(vk::CommandBuffer::null(), 1)
+            .expect_err("append should fail before initialize");
+        assert_eq!(err, -1);
     }
 }
