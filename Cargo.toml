@@ -6,12 +6,17 @@ links = "vkfft"
 
 [features]
 default = []
-wrapper = []
+# Enable Vulkan support via `ash` when you want to run the wrapper, tests, or examples
+# that require Vulkan drivers. Example commands:
+#   cargo test --features wrapper
+#   cargo run --example ash_fft --features "wrapper ash"
+ash = ["dep:ash"]
+wrapper = ["ash"]
 # If you want to control whether VkFFT uses Vulkan headers from your system or vendored ones later,
 # add features here.
 
 [dependencies]
-ash = "0.38"
+ash = { version = "0.38", optional = true }
 
 [build-dependencies]
 bindgen = "0.70"
