@@ -47,7 +47,8 @@ pub struct VkFft {
     dev: vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
-    buffer: vk::Buffer,
+    buffers: Vec<vk::Buffer>,
+    output_buffers: Vec<vk::Buffer>,
 
     buffer_sizes: Vec<u64>,
     temp_buffer_sizes: Vec<u64>,
@@ -71,10 +72,11 @@ impl VkFft {
             dev: vk::Device::null(),
             queue: vk::Queue::null(),
             command_pool: vk::CommandPool::null(),
-            buffer: vk::Buffer::null(),
-
+            buffers: Vec::new(),
+            output_buffers: Vec::new(),
             buffer_sizes: Vec::new(),
             temp_buffer_sizes: Vec::new(),
+
         }
     }
 
@@ -130,18 +132,90 @@ impl VkFft {
         self.config.size[2] = tmp[2];
     }
 
-    /// Configure input/output buffers (device buffers).
+    /// Configure input (and optional output) device buffers.
     ///
-    /// VkFFT generally wants pointers to VkBuffer handles (or arrays of them) stored as `u64`/void*,
-    /// depending on version. Here we assume the common `buffer` / `bufferSize` style.
+    /// VkFFT accepts one or more buffers via `buffer`/`bufferNum` for in-place transforms or
+    /// `inputBuffer`/`outputBuffer` for out-of-place transforms, depending on the version you
+    /// generated bindings for. Provide at least one input buffer; optionally pass a matching slice
+    /// of output buffers to enable out-of-place execution.
     ///
-    /// You will need to confirm the exact field names in your generated bindings and adjust.
-    pub fn configure_buffers(&mut self, buffer: vk::Buffer) {
-        // Common pattern: config.buffer = &vk_buffer_handle
-        // Many VkFFT examples store VkBuffer as a u64.
-        // Bindgen will reveal the type; this is the most frequent shape:
-        self.buffer = buffer;
-        self.config.buffer = (&mut self.buffer as *mut vk::Buffer).cast();
+    /// # Errors
+    ///
+    /// Returns an error if any provided slice is empty, if input/output slice lengths differ, or if
+    /// the slice length conflicts with an explicitly configured `numberBatches`.
+    ///
+    /// # Examples
+    ///
+    /// In-place transform using one buffer (common case):
+    ///
+    /// ```no_run
+    /// # use vkfft_bindings::VkFft;
+    /// # use ash::vk;
+    /// # let buffer: vk::Buffer = vk::Buffer::null();
+    /// let mut fft = VkFft::new();
+    /// fft.configure_dimensions(&[1024]);
+    /// fft.configure_buffers(&[buffer], None)?;
+    /// # Ok::<(), &'static str>(())
+    /// ```
+    ///
+    /// Out-of-place transform with separate input/output buffers:
+    ///
+    /// ```no_run
+    /// # use vkfft_bindings::VkFft;
+    /// # use ash::vk;
+    /// # let input: vk::Buffer = vk::Buffer::null();
+    /// # let output: vk::Buffer = vk::Buffer::null();
+    /// let mut fft = VkFft::new();
+    /// fft.configure_dimensions(&[256, 256]);
+    /// fft.configure_buffers(&[input], Some(&[output]))?;
+    /// # Ok::<(), &'static str>(())
+    /// ```
+    pub fn configure_buffers(
+        &mut self,
+        input_buffers: &[vk::Buffer],
+        output_buffers: Option<&[vk::Buffer]>,
+    ) -> Result<(), &'static str> {
+        if input_buffers.is_empty() {
+            return Err("configure_buffers: at least one input buffer is required");
+        }
+
+        if let Some(out) = output_buffers.as_ref() {
+            if out.is_empty() {
+                return Err("configure_buffers: output buffer slice must not be empty");
+            }
+            if out.len() != input_buffers.len() {
+                return Err("configure_buffers: input/output buffer counts must match");
+            }
+        }
+
+        if self.config.numberBatches > 1
+            && input_buffers.len() > 1
+            && input_buffers.len() as u64 != self.config.numberBatches
+        {
+            return Err("configure_buffers: buffer count must match configured numberBatches");
+        }
+
+        self.buffers.clear();
+        self.buffers.extend_from_slice(input_buffers);
+        self.config.bufferNum = self.buffers.len() as u64;
+        self.config.buffer = self.buffers.as_mut_ptr().cast();
+
+        if let Some(out) = output_buffers {
+            self.output_buffers.clear();
+            self.output_buffers.extend_from_slice(out);
+            self.config.inputBufferNum = self.buffers.len() as u64;
+            self.config.outputBufferNum = self.output_buffers.len() as u64;
+            self.config.inputBuffer = self.buffers.as_mut_ptr().cast();
+            self.config.outputBuffer = self.output_buffers.as_mut_ptr().cast();
+        } else {
+            self.output_buffers.clear();
+            self.config.inputBufferNum = 0;
+            self.config.outputBufferNum = 0;
+            self.config.inputBuffer = core::ptr::null_mut();
+            self.config.outputBuffer = core::ptr::null_mut();
+        }
+
+        Ok(())
     }
 
     /// Enable or disable double-precision FFT kernels.
