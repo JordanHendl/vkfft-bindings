@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 use ash::vk;
+use core::ffi::c_void;
 use core::fmt;
 
 use crate::ffi;
@@ -587,6 +588,44 @@ impl VkFft {
         self.config.bufferNum = 1;
     }
 
+    /// Configure plan cache download to write the compiled plan into `blob_out`.
+    ///
+    /// # Safety
+    /// `blob_out` must point to writable memory that is large enough for the
+    /// plan string produced by VkFFT. Consult VkFFT documentation for expected
+    /// sizes. The caller is responsible for ensuring the pointer remains valid
+    /// until initialization completes.
+    pub unsafe fn configure_plan_download(&mut self, blob_out: *mut c_void) {
+        self.config.saveApplicationToString = 1;
+        self.app.saveApplicationString = blob_out;
+    }
+
+    /// Configure plan cache upload by pointing VkFFT at a precompiled plan.
+    ///
+    /// # Safety
+    /// `blob` must point to a valid plan string previously produced by
+    /// VkFFT, and it must stay alive until initialization reads it.
+    pub unsafe fn configure_plan_upload(&mut self, blob: *const u8) {
+        self.config.loadApplicationFromString = 1;
+        self.config.loadApplicationString = blob.cast_mut().cast();
+    }
+
+    /// Set the user callback pointer if the generated bindings expose
+    /// callback hooks.
+    ///
+    /// The callback must use `extern "C"` calling conventions and adhere to
+    /// the signature expected by the particular VkFFT build. This helper
+    /// returns an error on bindings that do not expose callback pointers.
+    pub unsafe fn set_callback_pointer(
+        &mut self,
+        _callback: unsafe extern "C" fn(*mut c_void),
+    ) -> Result<(), &'static str> {
+        // Current bindings do not expose callback pointer slots. Keep the
+        // signature and documentation available so downstream users can adapt
+        // when regenerating bindings from a VkFFT build that supports them.
+        Err("Callback pointers are not exposed by the generated bindings")
+    }
+
     /// Finalize and create the VkFFT application.
     pub fn initialize(&mut self) -> Result<(), VkfftError> {
         let res = unsafe { ffi::vkfft_initialize(&mut self.app as *mut _, self.config) };
@@ -637,11 +676,26 @@ impl Drop for VkFft {
     }
 }
 
+
 #[cfg(all(feature = "wrapper", test))]
 mod tests {
+  
     use ash::vk::Handle;
-
     use super::*;
+    use core::ffi::c_void;
+
+    unsafe extern "C" fn dummy_callback(_userdata: *mut c_void) {}
+
+    #[test]
+    fn callback_pointer_api_is_exposed() {
+        let mut fft = VkFft::new();
+
+        let res = unsafe { fft.set_callback_pointer(dummy_callback) };
+
+        // Current bindings do not expose callback pointer slots, but the API
+        // shape should exist for forwards compatibility.
+        assert!(res.is_err());
+   }
 
     #[test]
     fn configures_dimensions_and_buffers() {
@@ -680,5 +734,6 @@ mod tests {
             .append(vk::CommandBuffer::null(), 1)
             .expect_err("append should fail before initialize");
         assert_eq!(err, -1);
+
     }
 }
