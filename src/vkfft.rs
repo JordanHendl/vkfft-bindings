@@ -9,6 +9,27 @@ fn vkfft_ok(r: ffi::VkFFTResult) -> bool {
     r == ffi::VkFFTResult::VKFFT_SUCCESS
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum VkfftError {
+    Vkfft(ffi::VkFFTResult),
+}
+
+impl core::fmt::Display for VkfftError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Vkfft(res) => write!(f, "VkFFT error: {:?}", res),
+        }
+    }
+}
+
+impl std::error::Error for VkfftError {}
+
+impl From<ffi::VkFFTResult> for VkfftError {
+    fn from(value: ffi::VkFFTResult) -> Self {
+        Self::Vkfft(value)
+    }
+}
+
 /// Thin wrapper around VkFFTApplication lifetime.
 ///
 /// VkFFT is C-style; most functions return an error code.
@@ -28,6 +49,9 @@ pub struct VkFft {
     command_pool: vk::CommandPool,
     buffers: Vec<vk::Buffer>,
     output_buffers: Vec<vk::Buffer>,
+
+    buffer_sizes: Vec<u64>,
+    temp_buffer_sizes: Vec<u64>,
 }
 
 impl VkFft {
@@ -50,6 +74,9 @@ impl VkFft {
             command_pool: vk::CommandPool::null(),
             buffers: Vec::new(),
             output_buffers: Vec::new(),
+            buffer_sizes: Vec::new(),
+            temp_buffer_sizes: Vec::new(),
+
         }
     }
 
@@ -191,13 +218,134 @@ impl VkFft {
         Ok(())
     }
 
+    /// Enable or disable double-precision FFT kernels.
+    ///
+    /// Default VkFFT behavior leaves `doublePrecision` at 0, selecting
+    /// single-precision kernels. Setting this flag to `true` requests
+    /// double-precision execution when the backend supports it.
+    ///
+    /// # Safety
+    /// The caller must ensure the chosen device and buffer formats are
+    /// compatible with double-precision computations.
+    pub fn set_double_precision(&mut self, enabled: bool) {
+        self.config.doublePrecision = enabled as u64;
+    }
+
+    /// Enable or disable half-precision FFT kernels.
+    ///
+    /// Default VkFFT behavior leaves `halfPrecision` at 0, meaning
+    /// half-precision kernels are not used. Setting this flag to `true`
+    /// requests half-precision execution when supported.
+    ///
+    /// # Safety
+    /// The caller must ensure the data layout, device, and shader
+    /// capabilities can safely handle half-precision computation.
+    pub fn set_half_precision(&mut self, enabled: bool) {
+        self.config.halfPrecision = enabled as u64;
+    }
+
+    /// Configure the number of batched FFTs.
+    ///
+    /// By default VkFFT uses a single batch when `numberBatches` is 0.
+    /// Provide an explicit batch count to match the buffers you plan to
+    /// process.
+    ///
+    /// # Safety
+    /// The caller must ensure buffer sizes and strides are sized to fit
+    /// the requested batch count.
+    pub fn set_batch_count(&mut self, batches: u64) {
+        self.config.numberBatches = batches;
+    }
+
+    /// Configure element strides for interleaved/strided data.
+    ///
+    /// The default VkFFT layout uses contiguous buffers with zeroed
+    /// stride values. Provide explicit strides to match custom memory
+    /// layouts.
+    ///
+    /// # Safety
+    /// Strides must match the actual buffer layout; incorrect values can
+    /// lead to out-of-bounds access in device memory.
+    pub fn set_strides(
+        &mut self,
+        buffer_stride: [u64; 4],
+        input_stride: Option<[u64; 4]>,
+        output_stride: Option<[u64; 4]>,
+    ) {
+        self.config.bufferStride = buffer_stride;
+
+        if let Some(stride) = input_stride {
+            self.config.inputBufferStride = stride;
+        }
+
+        if let Some(stride) = output_stride {
+            self.config.outputBufferStride = stride;
+        }
+    }
+
+    /// Declare whether input and output buffers are already formatted for VkFFT.
+    ///
+    /// VkFFT defaults to `isInputFormatted = 0` and `isOutputFormatted = 0`,
+    /// meaning it will apply its own formatting. Setting either flag to `true`
+    /// tells VkFFT to treat the corresponding buffer as already formatted.
+    ///
+    /// # Safety
+    /// The caller must ensure the buffers match VkFFT's expected formatted
+    /// layout when these flags are enabled.
+    pub fn set_layout_flags(&mut self, input_formatted: bool, output_formatted: bool) {
+        self.config.isInputFormatted = input_formatted as u64;
+        self.config.isOutputFormatted = output_formatted as u64;
+    }
+
+    /// Provide explicit sizes for the primary buffers in bytes.
+    ///
+    /// Defaults leave `bufferSize` as a null pointer, allowing VkFFT to
+    /// infer sizes from dimensions. Supplying values is useful when VkFFT
+    /// should validate or adjust for exact buffer sizes.
+    ///
+    /// # Safety
+    /// Sizes must match the actual allocations referenced by `buffer` and
+    /// related handles. The backing slice is stored in the wrapper to keep
+    /// the pointers valid until reconfigured or dropped.
+    pub fn set_buffer_sizes(&mut self, sizes: &[u64]) {
+        self.buffer_sizes.clear();
+        self.buffer_sizes.extend_from_slice(sizes);
+        self.config.bufferSize = if self.buffer_sizes.is_empty() {
+            core::ptr::null_mut()
+        } else {
+            self.buffer_sizes.as_mut_ptr()
+        };
+    }
+
+    /// Provide explicit sizes for temporary buffers in bytes.
+    ///
+    /// Defaults leave `tempBufferSize` null, letting VkFFT pick temporary
+    /// allocations. Passing concrete values allows tighter control over
+    /// scratch-space planning.
+    ///
+    /// # Safety
+    /// The caller is responsible for ensuring the provided sizes match the
+    /// allocated temporary buffers and that the pointers remain valid. The
+    /// wrapper retains the backing storage to maintain pointer validity.
+    pub fn set_temp_buffer_sizes(&mut self, sizes: &[u64]) {
+        self.temp_buffer_sizes.clear();
+        self.temp_buffer_sizes.extend_from_slice(sizes);
+        self.config.tempBufferSize = if self.temp_buffer_sizes.is_empty() {
+            core::ptr::null_mut()
+        } else {
+            self.temp_buffer_sizes.as_mut_ptr()
+        };
+    }
+
     /// Finalize and create the VkFFT application.
-    pub fn initialize(&mut self) -> Result<(), ffi::VkFFTResult> {
+    pub fn initialize(&mut self) -> Result<(), VkfftError> {
         let res = unsafe { ffi::vkfft_initialize(&mut self.app as *mut _, self.config) };
         if vkfft_ok(res) {
+            self.initialized = true;
             Ok(())
         } else {
-            Err(res)
+            self.initialized = false;
+            Err(res.into())
         }
     }
 
