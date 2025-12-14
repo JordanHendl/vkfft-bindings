@@ -1,0 +1,22 @@
+[package]
+name = "vkfft-bindings"
+version = "0.1.0"
+edition = "2021"
+links = "vkfft"
+
+[features]
+default = []
+wrapper = []
+# If you want to control whether VkFFT uses Vulkan headers from your system or vendored ones later,
+# add features here.
+
+[dependencies]
+ash = "0.38"
+
+[build-dependencies]
+bindgen = "0.70"
+cc = "1.1"
+
+[lib]
+path = "src/lib.rs"
+
